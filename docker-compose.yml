@@ -8,5 +8,11 @@ services:
     environment:
       DATA_DIR: /data
     volumes:
-      - ./data:/data
+      # Named volume: Docker creates it with the right owner for the container user,
+      # so it also works on Linux servers (a ./data bind mount would be owned by root).
+      - botdata:/data
     init: true
+    stop_grace_period: 30s
+
+volumes:
+  botdata:

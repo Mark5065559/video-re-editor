@@ -1,2 +1,6 @@
 aiogram>=3.20,<4.0
 python-dotenv>=1.0,<2.0
+# MTProto client for videos bigger than 20 MB (needs TG_API_ID/TG_API_HASH)
+telethon>=1.36,<2.0
+# Optional native crypto for Telethon: much faster big-file transfers
+cryptg>=0.4; python_version < "3.15"
