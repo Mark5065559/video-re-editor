@@ -7,7 +7,7 @@ ENV_KEYS = [
     "BOT_TOKEN", "BOT_API_MODE", "BOT_API_BASE_URL", "TG_API_ID", "TG_API_HASH", "ALLOWED_USER_IDS",
     "MAX_INPUT_MB", "MAX_OUTPUT_MB", "MAX_DURATION_SECONDS", "DATA_DIR", "MAX_PARALLEL_JOBS",
     "JOB_TIMEOUT_SECONDS", "USER_RATE_LIMIT_COUNT", "USER_RATE_LIMIT_WINDOW_SECONDS",
-    "PENDING_TTL_MINUTES", "MAX_UNIQUE_COPIES",
+    "PENDING_TTL_MINUTES", "MAX_UNIQUE_COPIES", "ACCESS_MODE",
 ]
 
 
@@ -81,5 +81,16 @@ def test_allowed_users_and_local_mode(env):
     assert settings.bot_api_base_url == "http://127.0.0.1:8081"
 
     env.setenv("ALLOWED_USER_IDS", "me")
+    with pytest.raises(ValueError):
+        load_settings(use_dotenv=False)
+
+
+def test_access_mode(env):
+    assert load_settings(use_dotenv=False).access_mode == "owner"
+    assert load_settings(use_dotenv=False).is_private_bot
+    env.setenv("ACCESS_MODE", "public")
+    settings = load_settings(use_dotenv=False)
+    assert settings.access_mode == "public" and not settings.is_private_bot
+    env.setenv("ACCESS_MODE", "everyone")
     with pytest.raises(ValueError):
         load_settings(use_dotenv=False)

@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.2.0 — 2026-11-03
+- Owner mode (default): the first person who writes to the bot becomes its owner, everybody else is
+  refused. No Telegram ID has to be configured. ACCESS_MODE=public keeps the old open behaviour,
+  ALLOWED_USER_IDS still overrides both.
+- One-file server installer for Oracle Cloud Always Free (deploy/oracle): chosen as the cloud-init
+  script when the server is created. Installs FFmpeg/Python/Git, swap on small machines, downloads the
+  code from GitHub (waits while the repository is private), runs the bot as a systemd service with
+  automatic restarts and logs on the serial console, and checks GitHub every 6 hours for a new version
+  (verified before switching, postponed while the bot is busy, rolled back if it does not start).
+  build_installer.py fills in the token and API keys; built files are git-ignored.
+
 ## 1.1.0 — 2026-11-03
 - Uniquelizer: 1–5 different copies per run with random zoom/shift, slight rotation without black corners,
   colour, hue, grain, sharpness, vignette, speed, edge trims, audio level/EQ, sample rate, fresh metadata

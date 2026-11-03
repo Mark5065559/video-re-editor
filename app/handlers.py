@@ -15,6 +15,7 @@ from aiogram.filters import Command, CommandStart
 from aiogram.types import CallbackQuery, FSInputFile, InlineKeyboardMarkup, Message, TelegramObject
 from aiogram.utils.chat_action import ChatActionSender
 
+from .access import OwnerStore
 from .config import BOT_API_DOWNLOAD_LIMIT_MB, BOT_API_SAFE_UPLOAD_MB, MB, Settings
 from .db import HistoryDB
 from .jobs import JobManager, PendingUpload, RateLimiter, remove_dir
@@ -60,6 +61,7 @@ class BotServices:
         self.semaphore = asyncio.Semaphore(settings.max_parallel_jobs)
         self.upload_limiter = RateLimiter(settings.user_rate_limit_count, settings.user_rate_limit_window_seconds)
         self.job_limiter = RateLimiter(settings.user_rate_limit_count, settings.user_rate_limit_window_seconds)
+        self.owner_store = OwnerStore(settings.owners_path)
         self._tasks: set[asyncio.Task] = set()
 
     @property
@@ -82,11 +84,31 @@ class BotServices:
             return self.settings.max_output_mb
         return min(self.settings.max_output_mb, 47)
 
+    @property
+    def access_description(self) -> str:
+        if self.settings.allowed_user_ids:
+            return "только ID из ALLOWED_USER_IDS"
+        if self.settings.access_mode == "public":
+            return "все пользователи"
+        return "только владелец"
+
     def user_allowed(self, user_id: int) -> bool:
-        return not self.settings.allowed_user_ids or user_id in self.settings.allowed_user_ids
+        if self.settings.allowed_user_ids:
+            return user_id in self.settings.allowed_user_ids
+        if self.settings.access_mode == "public":
+            return True
+        return user_id in self.owner_store.owners
+
+    def claim_owner(self, user_id: int) -> bool:
+        if self.settings.allowed_user_ids or self.settings.access_mode != "owner":
+            return False
+        if not self.owner_store.claim(user_id):
+            return False
+        log.info("Владелец бота назначен: %s", user_id)
+        return True
 
     def allow_upload(self, user_id: int) -> bool:
-        # A private bot (ALLOWED_USER_IDS set) has no rate limit for its owners.
+        # A private bot (owner mode or ALLOWED_USER_IDS) has no rate limit for its users.
         return self.settings.is_private_bot or self.upload_limiter.hit(user_id)
 
     def allow_job(self, user_id: int) -> bool:
@@ -282,6 +304,10 @@ class AccessMiddleware(BaseMiddleware):
         user = data.get("event_from_user")
         if user is None:
             return None
+        if self.services.claim_owner(user.id) and isinstance(event, Message):
+            await event.answer(
+                "👑 Ты — владелец этого бота. Другие люди доступа не получат: они увидят сообщение «частный бот»."
+            )
         if self.services.user_allowed(user.id):
             return await handler(event, data)
         if isinstance(event, Message):
@@ -323,7 +349,8 @@ async def cmd_help(message: Message, services: BotServices) -> None:
         f"{services.settings.pending_ttl_minutes} мин — можно сделать ещё варианты без повторной загрузки.\n\n"
         f"Вход: {size_hint(services)}, до {services.settings.max_duration_seconds // 60} мин.\n"
         f"Выход: до {services.output_limit_mb} МБ.\n"
-        f"Большие файлы: {mtproto}.\n\n"
+        f"Большие файлы: {mtproto}.\n"
+        f"Доступ: {services.access_description}.\n\n"
         "/start — меню\n/cancel — остановить обработку или удалить исходник\n/id — твой Telegram ID"
     )
 

@@ -13,3 +13,7 @@ temp/
 *.session-journal
 .DS_Store
 Thumbs.db
+
+# Built server installers contain secrets
+*.secret.sh
+video-re-editor-oracle-install*.sh

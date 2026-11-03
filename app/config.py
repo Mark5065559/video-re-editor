@@ -45,6 +45,9 @@ class Settings:
     allowed_user_ids: frozenset[int] = frozenset()
     pending_ttl_minutes: int = 30
     max_unique_copies: int = 5
+    # owner: the first person who writes to the bot becomes its owner, others are refused;
+    # public: anyone may use the bot (with rate limits). ALLOWED_USER_IDS overrides both.
+    access_mode: str = "owner"
 
     @property
     def mtproto_configured(self) -> bool:
@@ -57,7 +60,11 @@ class Settings:
 
     @property
     def is_private_bot(self) -> bool:
-        return bool(self.allowed_user_ids)
+        return bool(self.allowed_user_ids) or self.access_mode == "owner"
+
+    @property
+    def owners_path(self) -> Path:
+        return self.data_dir / "owners.json"
 
     @property
     def temp_dir(self) -> Path:
@@ -152,6 +159,10 @@ def load_settings(*, use_dotenv: bool = True) -> Settings:
     if mode not in {"official", "local"}:
         raise ValueError("BOT_API_MODE должен быть official или local")
 
+    access_mode = (os.getenv("ACCESS_MODE") or "owner").strip().lower()
+    if access_mode not in {"owner", "public"}:
+        raise ValueError("ACCESS_MODE должен быть owner или public")
+
     api_id, api_hash = _api_credentials()
     if mode == "local":
         default_input, default_output = 500, 1800
@@ -193,4 +204,5 @@ def load_settings(*, use_dotenv: bool = True) -> Settings:
         allowed_user_ids=_parse_user_ids(os.getenv("ALLOWED_USER_IDS") or ""),
         pending_ttl_minutes=_int_env("PENDING_TTL_MINUTES", 30),
         max_unique_copies=_int_env("MAX_UNIQUE_COPIES", 5, maximum=10),
+        access_mode=access_mode,
     )

@@ -299,3 +299,26 @@ def test_private_bot_and_wrong_files(tmp_path, sample):
         await bot.session.close()
 
     asyncio.run(scenario())
+
+
+def test_first_user_becomes_owner_others_are_refused(tmp_path, sample):
+    async def scenario():
+        session, bot, services, dp = build(tmp_path, {"vid1": sample})
+        assert services.settings.access_mode == "owner" and not services.owner_store.owners
+        await dp.feed_update(bot, text_update(bot, 1, "/start"))
+        assert any("владелец этого бота" in text for text in session.texts())
+        assert services.owner_store.owners == {777}
+
+        stranger = {"id": 888, "is_bot": False, "first_name": "Stranger"}
+        update = Update.model_validate({"update_id": 2, "message": {
+            "message_id": 90, "date": int(time.time()), "chat": {"id": 888, "type": "private"},
+            "from": stranger, "text": "/start"}}, context={"bot": bot})
+        await dp.feed_update(bot, update)
+        assert "частный бот" in session.texts()[-1] and "888" in session.texts()[-1]
+        assert services.owner_store.owners == {777}
+
+        await dp.feed_update(bot, video_update(bot, 3, 100, "vid1", sample.stat().st_size))
+        assert "Видео проверено" in session.texts()[-1]  # the owner keeps working
+        await bot.session.close()
+
+    asyncio.run(scenario())

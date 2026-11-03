@@ -101,8 +101,10 @@ async def main() -> int:
         log.info(
             "Бот запущен: @%s | API mode=%s | вход до %s МБ, выход до %s МБ | доступ: %s",
             me.username, settings.bot_api_mode, services.input_limit_mb, services.output_limit_mb,
-            "только ALLOWED_USER_IDS" if settings.is_private_bot else "все пользователи",
+            services.access_description,
         )
+        if settings.access_mode == "owner" and not settings.allowed_user_ids and not services.owner_store.owners:
+            log.info("Владелец ещё не назначен: первый, кто напишет боту @%s, станет владельцем.", me.username)
         await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
     finally:
         if cleanup_task is not None:
