@@ -18,6 +18,8 @@ from aiogram.webhook.aiohttp_server import SimpleRequestHandler
 
 log = logging.getLogger(__name__)
 STARTED = time.time()
+# Filled in by main.py; visible at /health so problems can be seen from a phone browser.
+STATUS: dict[str, object] = {"bot": None, "webhook": "not set yet", "error": None}
 
 
 def webhook_path(token: str) -> str:
@@ -34,7 +36,8 @@ def build_app(dp: Dispatcher, bot: Bot, services, *, webhook: bool) -> web.Appli
 
     async def health(_: web.Request) -> web.Response:
         return web.json_response({
-            "ok": True,
+            "ok": STATUS["error"] is None,
+            **STATUS,
             "uptime": int(time.time() - STARTED),
             "busy": services.busy(),
             "jobs": services.jobs.active_count(),

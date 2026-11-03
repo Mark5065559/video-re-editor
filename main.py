@@ -19,7 +19,7 @@ from app.db import HistoryDB
 from app.handlers import BotServices, setup_router
 from app.jobs import clean_temp_root
 from app.mtproto import MTProtoFiles
-from app.web import build_app, keep_awake, start_server, webhook_path, webhook_secret
+from app.web import STATUS, build_app, keep_awake, start_server, webhook_path, webhook_secret
 
 log = logging.getLogger("video-re-editor")
 
@@ -40,6 +40,28 @@ async def wait_for_stop_signal() -> None:
         except (NotImplementedError, RuntimeError):  # Windows
             pass
     await stop.wait()
+
+
+async def setup_webhook(bot: Bot, dp: Dispatcher, url: str, *, attempts: int = 6, delay: float = 20) -> bool:
+    """A brand-new cloud address may not resolve yet for Telegram; retry instead of crashing."""
+    for attempt in range(1, attempts + 1):
+        try:
+            await bot.set_webhook(
+                url, secret_token=webhook_secret(bot.token),
+                allowed_updates=dp.resolve_used_update_types(), drop_pending_updates=False,
+            )
+            info = await bot.get_webhook_info()
+            STATUS["webhook"] = "ok"
+            log.info("Вебхук установлен, ждут доставки: %s", info.pending_update_count)
+            if info.last_error_message:
+                log.info("Последняя ошибка доставки по данным Telegram: %s", info.last_error_message)
+            return True
+        except TelegramAPIError as exc:
+            STATUS["webhook"] = f"failed: {exc}"
+            log.warning("Telegram не принял вебхук (попытка %s из %s): %s", attempt, attempts, exc)
+            if attempt < attempts:
+                await asyncio.sleep(delay)
+    return False
 
 
 async def main() -> int:
@@ -92,6 +114,7 @@ async def main() -> int:
             runner = await start_server(build_app(dp, bot, services, webhook=webhook_mode), settings.port)
         try:
             me = await bot.get_me()
+            STATUS["bot"] = f"@{me.username}"
         except TelegramUnauthorizedError:
             log.error("Telegram отклонил BOT_TOKEN. Проверь токен или выпусти новый через @BotFather.")
             return 1
@@ -129,14 +152,17 @@ async def main() -> int:
         if services.remote_owners_enabled and not services.owner_store.owners:
             log.info("Владелец ещё не назначен: первый, кто напишет боту @%s, станет владельцем.", me.username)
 
-        if webhook_mode:
-            await bot.set_webhook(
-                settings.public_url + webhook_path(bot.token), secret_token=webhook_secret(bot.token),
-                allowed_updates=dp.resolve_used_update_types(), drop_pending_updates=False,
-            )
+        if webhook_mode and await setup_webhook(bot, dp, settings.public_url + webhook_path(bot.token)):
             log.info("Вебхук: %s (засыпание без работы: %s)", settings.public_url, settings.keep_awake)
             background.append(asyncio.create_task(keep_awake(settings.public_url, services, settings.keep_awake)))
             await wait_for_stop_signal()
+        elif webhook_mode:
+            # Fallback: classic polling and staying awake, so the bot answers anyway.
+            STATUS["webhook"] = "polling (webhook failed)"
+            log.warning("Вебхук не установился — работаю через опрос Telegram и не засыпаю.")
+            background.append(asyncio.create_task(keep_awake(settings.public_url, services, "always")))
+            await bot.delete_webhook(drop_pending_updates=False)
+            await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
         else:
             # A webhook left from another bot framework blocks getUpdates.
             await bot.delete_webhook(drop_pending_updates=False)

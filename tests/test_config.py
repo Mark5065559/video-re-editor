@@ -66,11 +66,30 @@ def test_api_credentials_enable_big_files(env):
     ("12345", ""), ("", "0123456789abcdef0123456789abcdef"), ("12a45", "0123456789abcdef0123456789abcdef"),
     ("12345", "short"),
 ])
-def test_bad_api_credentials_are_rejected(env, api_id, api_hash):
+def test_unusable_api_credentials_only_disable_big_files(env, api_id, api_hash):
     env.setenv("TG_API_ID", api_id)
     env.setenv("TG_API_HASH", api_hash)
-    with pytest.raises(ValueError):
-        load_settings(use_dotenv=False)
+    settings = load_settings(use_dotenv=False)  # the bot still starts
+    assert not settings.mtproto_configured and settings.max_input_mb == 19
+
+
+@pytest.mark.parametrize("token_value,id_value,hash_value", [
+    # labels copied together with the values
+    (f"BOT_TOKEN    {TOKEN}", "TG_API_ID    24681357", "TG_API_HASH  ABCDEF0123456789ABCDEF0123456789"),
+    # quotes and spaces
+    (f'  "{TOKEN}" ', "'24681357'", " abcdef0123456789abcdef0123456789\n"),
+    # everything pasted into the first field
+    (f"BOT_TOKEN {TOKEN}\nTG_API_ID 24681357\nTG_API_HASH abcdef0123456789abcdef0123456789", "", ""),
+    # id and hash swapped
+    (TOKEN, "abcdef0123456789abcdef0123456789", "24681357"),
+])
+def test_pasted_values_are_recognised(env, token_value, id_value, hash_value):
+    env.setenv("BOT_TOKEN", token_value)
+    env.setenv("TG_API_ID", id_value)
+    env.setenv("TG_API_HASH", hash_value)
+    settings = load_settings(use_dotenv=False)
+    assert settings.bot_token == TOKEN
+    assert settings.tg_api_id == 24681357 and settings.tg_api_hash == "abcdef0123456789abcdef0123456789"
 
 
 def test_allowed_users_and_local_mode(env):

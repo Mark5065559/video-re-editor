@@ -24,7 +24,6 @@ MTPROTO_LIMIT_MB = 2000
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 _TOKEN_RE = re.compile(r"^\d{5,}:[A-Za-z0-9_-]{30,}$")
-_API_HASH_RE = re.compile(r"^[0-9a-fA-F]{32}$")
 
 
 @dataclass(frozen=True)
@@ -157,18 +156,38 @@ def _parse_user_ids(raw: str) -> frozenset[int]:
     return frozenset(ids)
 
 
+# Values are often pasted with extra text ("BOT_TOKEN  123:AA...", quotes, all three lines in one
+# field, swapped fields). Each value has a recognisable shape, so it is picked out wherever it is.
+_TOKEN_SEARCH = re.compile(r"\d{5,}:[A-Za-z0-9_-]{30,}")
+_HASH_SEARCH = re.compile(r"(?<![0-9A-Za-z])[0-9a-fA-F]{32}(?![0-9A-Za-z])")
+_ID_SEARCH = re.compile(r"(?<![0-9A-Za-z:_-])\d{3,12}(?![0-9A-Za-z:_-])")
+
+
+def _credential_texts() -> tuple[str, str, str]:
+    return tuple((os.getenv(name) or "") for name in ("BOT_TOKEN", "TG_API_ID", "TG_API_HASH"))  # type: ignore[return-value]
+
+
+def _find_token() -> str:
+    token_raw, id_raw, hash_raw = _credential_texts()
+    match = _TOKEN_SEARCH.search(token_raw) or _TOKEN_SEARCH.search(f"{id_raw} {hash_raw}")
+    return match.group(0) if match else token_raw.strip().strip("'\"")
+
+
 def _api_credentials() -> tuple[int | None, str | None]:
-    raw_id = (os.getenv("TG_API_ID") or "").strip()
-    raw_hash = (os.getenv("TG_API_HASH") or "").strip()
-    if not raw_id and not raw_hash:
+    token_raw, id_raw, hash_raw = _credential_texts()
+    if not id_raw.strip() and not hash_raw.strip() and not _HASH_SEARCH.search(token_raw):
         return None, None
-    if not raw_id or not raw_hash:
-        raise ValueError("Укажи оба значения TG_API_ID и TG_API_HASH (или оставь оба пустыми).")
-    if not raw_id.isdigit():
-        raise ValueError("TG_API_ID должен состоять только из цифр (см. my.telegram.org).")
-    if not _API_HASH_RE.fullmatch(raw_hash):
-        raise ValueError("TG_API_HASH должен быть строкой из 32 шестнадцатеричных символов (см. my.telegram.org).")
-    return int(raw_id), raw_hash.lower()
+    everything = _TOKEN_SEARCH.sub(" ", f"{id_raw} {hash_raw} {token_raw}")
+    hash_match = _HASH_SEARCH.search(_TOKEN_SEARCH.sub(" ", hash_raw)) or _HASH_SEARCH.search(everything)
+    id_source = _HASH_SEARCH.sub(" ", _TOKEN_SEARCH.sub(" ", id_raw))
+    id_match = _ID_SEARCH.search(id_source) or _ID_SEARCH.search(_HASH_SEARCH.sub(" ", everything))
+    if not hash_match or not id_match:
+        log.warning(
+            "TG_API_ID/TG_API_HASH не распознаны (нужны число и 32 символа 0-9a-f с my.telegram.org): "
+            "большие файлы отключены, бот работает с лимитом 20 МБ."
+        )
+        return None, None
+    return int(id_match.group(0)), hash_match.group(0).lower()
 
 
 def load_env_file() -> Path | None:
@@ -192,7 +211,7 @@ def _missing_token_hint() -> str:
 def load_settings(*, use_dotenv: bool = True) -> Settings:
     if use_dotenv:
         load_env_file()
-    token = (os.getenv("BOT_TOKEN") or "").strip()
+    token = _find_token()
     if not token or token == "PASTE_BOT_TOKEN_HERE":
         raise RuntimeError(
             "Не задан BOT_TOKEN. Скопируйте .env.example в .env и вставьте токен от @BotFather."

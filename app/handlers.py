@@ -386,6 +386,21 @@ class AccessMiddleware(BaseMiddleware):
         return None
 
 
+class UpdateLogMiddleware(BaseMiddleware):
+    """One line per incoming update (no content): shows in the host's logs that Telegram reaches the bot."""
+
+    async def __call__(
+        self,
+        handler: Callable[[TelegramObject, dict[str, Any]], Awaitable[Any]],
+        event: TelegramObject,
+        data: dict[str, Any],
+    ) -> Any:
+        user = data.get("event_from_user")
+        kind = "нажатие кнопки" if isinstance(event, CallbackQuery) else "сообщение"
+        log.info("Входящее %s от %s", kind, user.id if user else "?")
+        return await handler(event, data)
+
+
 # --- commands and menu -----------------------------------------------------
 
 async def cmd_start(message: Message, services: BotServices) -> None:
@@ -806,6 +821,9 @@ def setup_router(dp: Dispatcher, services: BotServices, settings: Settings) -> R
     router = Router(name="video-re-editor")
     router.message.filter(F.chat.type == ChatType.PRIVATE)
     router.callback_query.filter(F.message.chat.type == ChatType.PRIVATE)
+    update_log = UpdateLogMiddleware()
+    router.message.outer_middleware(update_log)
+    router.callback_query.outer_middleware(update_log)
     access = AccessMiddleware(services)
     router.message.middleware(access)
     router.callback_query.middleware(access)
