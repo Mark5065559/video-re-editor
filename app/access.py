@@ -30,11 +30,22 @@ class OwnerStore:
                 self.path,
             )
 
+    def adopt(self, owners: set[int]) -> None:
+        """Owners restored from Telegram after the local disk was wiped."""
+        if self.owners or not owners:
+            return
+        self.owners = set(owners)
+        self._write()
+
     def claim(self, user_id: int) -> bool:
         """The first caller becomes the owner. Synchronous, so two users cannot both win."""
         if self.owners or self.broken:
             return False
         self.owners.add(user_id)
+        self._write()
+        return True
+
+    def _write(self) -> None:
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             temporary = self.path.with_name(self.path.name + ".tmp")
@@ -42,4 +53,30 @@ class OwnerStore:
             os.replace(temporary, self.path)
         except OSError:
             log.exception("Не удалось сохранить владельца в %s (действует до перезапуска)", self.path)
-        return True
+
+
+# On free cloud hosting the disk is wiped at every restart, so the owner is also kept on
+# Telegram's side: as a bot command list for a scope and language nobody uses here (Zulu
+# group administrators; the bot only works in private chats). Nobody sees it in practice.
+_REMOTE_COMMAND = "vreowner"
+_REMOTE_LANGUAGE = "zu"
+
+
+async def load_remote_owners(bot) -> set[int]:
+    from aiogram.types import BotCommandScopeAllChatAdministrators
+
+    commands = await bot.get_my_commands(scope=BotCommandScopeAllChatAdministrators(), language_code=_REMOTE_LANGUAGE)
+    for command in commands:
+        if command.command == _REMOTE_COMMAND:
+            return {int(part) for part in command.description.split() if part.isdigit()}
+    return set()
+
+
+async def save_remote_owners(bot, owners: set[int]) -> None:
+    from aiogram.types import BotCommand, BotCommandScopeAllChatAdministrators
+
+    description = " ".join(str(owner) for owner in sorted(owners)) or "-"
+    await bot.set_my_commands(
+        [BotCommand(command=_REMOTE_COMMAND, description=description)],
+        scope=BotCommandScopeAllChatAdministrators(), language_code=_REMOTE_LANGUAGE,
+    )

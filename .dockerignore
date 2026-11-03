@@ -15,3 +15,7 @@ temp
 *.mov
 *.mkv
 *.log
+deploy
+render.yaml
+*.md
+run_windows.bat

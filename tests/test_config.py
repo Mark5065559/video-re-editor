@@ -7,7 +7,8 @@ ENV_KEYS = [
     "BOT_TOKEN", "BOT_API_MODE", "BOT_API_BASE_URL", "TG_API_ID", "TG_API_HASH", "ALLOWED_USER_IDS",
     "MAX_INPUT_MB", "MAX_OUTPUT_MB", "MAX_DURATION_SECONDS", "DATA_DIR", "MAX_PARALLEL_JOBS",
     "JOB_TIMEOUT_SECONDS", "USER_RATE_LIMIT_COUNT", "USER_RATE_LIMIT_WINDOW_SECONDS",
-    "PENDING_TTL_MINUTES", "MAX_UNIQUE_COPIES", "ACCESS_MODE",
+    "PENDING_TTL_MINUTES", "MAX_UNIQUE_COPIES", "ACCESS_MODE", "PORT", "WEBHOOK_BASE_URL",
+    "RENDER_EXTERNAL_URL", "RUN_MODE", "KEEP_AWAKE", "CPU_PROFILE",
 ]
 
 
@@ -17,6 +18,7 @@ def env(monkeypatch, tmp_path):
         monkeypatch.delenv(key, raising=False)
     monkeypatch.setenv("BOT_TOKEN", TOKEN)
     monkeypatch.setenv("DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("CPU_PROFILE", "normal")  # do not depend on the test machine
     return monkeypatch
 
 
@@ -92,5 +94,25 @@ def test_access_mode(env):
     settings = load_settings(use_dotenv=False)
     assert settings.access_mode == "public" and not settings.is_private_bot
     env.setenv("ACCESS_MODE", "everyone")
+    with pytest.raises(ValueError):
+        load_settings(use_dotenv=False)
+
+
+def test_cloud_settings(env):
+    settings = load_settings(use_dotenv=False)
+    assert (settings.run_mode, settings.port, settings.public_url, settings.keep_awake) == ("polling", 0, "", "busy")
+
+    env.setenv("PORT", "10000")
+    env.setenv("RENDER_EXTERNAL_URL", "https://video-re-editor.onrender.com/")
+    env.setenv("CPU_PROFILE", "lite")
+    settings = load_settings(use_dotenv=False)
+    assert settings.run_mode == "webhook" and settings.port == 10000
+    assert settings.public_url == "https://video-re-editor.onrender.com"
+    assert settings.cpu_profile == "lite" and settings.job_timeout_seconds == 3600
+
+    env.setenv("RUN_MODE", "polling")
+    assert load_settings(use_dotenv=False).run_mode == "polling"
+    env.setenv("RUN_MODE", "webhook")
+    env.setenv("RENDER_EXTERNAL_URL", "http://insecure.example")
     with pytest.raises(ValueError):
         load_settings(use_dotenv=False)

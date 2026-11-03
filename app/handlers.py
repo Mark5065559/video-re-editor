@@ -15,13 +15,16 @@ from aiogram.filters import Command, CommandStart
 from aiogram.types import CallbackQuery, FSInputFile, InlineKeyboardMarkup, Message, TelegramObject
 from aiogram.utils.chat_action import ChatActionSender
 
-from .access import OwnerStore
+from .access import OwnerStore, load_remote_owners, save_remote_owners
 from .config import BOT_API_DOWNLOAD_LIMIT_MB, BOT_API_SAFE_UPLOAD_MB, MB, Settings
 from .db import HistoryDB
 from .jobs import JobManager, PendingUpload, RateLimiter, remove_dir
 from .keyboards import main_keyboard, preset_keyboard, stop_keyboard, unique_keyboard
 from .media import (
+    LITE_PROFILE,
+    NORMAL_PROFILE,
     PRESETS,
+    EncodeProfile,
     FFmpegTimeoutError,
     MediaError,
     VideoInfo,
@@ -53,7 +56,8 @@ UPLOAD_TIMEOUT = 900  # seconds, HTTP Bot API upload
 
 
 class BotServices:
-    def __init__(self, settings: Settings, db: HistoryDB, mtproto: MTProtoFiles | None = None):
+    def __init__(self, settings: Settings, db: HistoryDB, mtproto: MTProtoFiles | None = None, *,
+                 mtproto_lazy: bool = False):
         self.settings = settings
         self.db = db
         self.mtproto = mtproto
@@ -63,14 +67,73 @@ class BotServices:
         self.job_limiter = RateLimiter(settings.user_rate_limit_count, settings.user_rate_limit_window_seconds)
         self.owner_store = OwnerStore(settings.owners_path)
         self._tasks: set[asyncio.Task] = set()
+        # Lazy MTProto (cloud hosting): log in only when a big file actually needs it.
+        self.mtproto_lazy = mtproto_lazy
+        self._mtproto_lock = asyncio.Lock()
+        self._mtproto_failed_at: float | None = None
+        self.inflight = 0  # uploads being downloaded right now
 
     @property
     def mtproto_ready(self) -> bool:
         return self.mtproto is not None and self.mtproto.available
 
+    def _mtproto_recently_failed(self) -> bool:
+        return self._mtproto_failed_at is not None and time.monotonic() - self._mtproto_failed_at < 600
+
     @property
     def big_files(self) -> bool:
-        return self.settings.bot_api_mode == "local" or self.mtproto_ready
+        if self.settings.bot_api_mode == "local" or self.mtproto_ready:
+            return True
+        return self.mtproto is not None and self.mtproto_lazy and not self._mtproto_recently_failed()
+
+    async def mtproto_client(self) -> MTProtoFiles | None:
+        if self.mtproto is None:
+            return None
+        if self.mtproto.available:
+            return self.mtproto
+        if not self.mtproto_lazy or self._mtproto_recently_failed():
+            return None
+        async with self._mtproto_lock:
+            if self.mtproto.available:
+                return self.mtproto
+            if await self.mtproto.start():
+                log.info("MTProto подключён по требованию")
+                return self.mtproto
+            self._mtproto_failed_at = time.monotonic()
+            log.warning("MTProto не подключился: %s", self.mtproto.error)
+            return None
+
+    @property
+    def profile(self) -> EncodeProfile:
+        return LITE_PROFILE if self.settings.cpu_profile == "lite" else NORMAL_PROFILE
+
+    def busy(self) -> bool:
+        """Something is going on that would be lost if a cloud host put the bot to sleep."""
+        return self.inflight > 0 or self.jobs.active_count() > 0 or self.jobs.pending_count() > 0
+
+    @property
+    def remote_owners_enabled(self) -> bool:
+        return self.settings.access_mode == "owner" and not self.settings.allowed_user_ids
+
+    async def restore_owners(self, bot: Bot) -> None:
+        """After a restart with a wiped disk, take the owner back from Telegram."""
+        if not self.remote_owners_enabled:
+            return
+        try:
+            remote = await load_remote_owners(bot)
+            if remote and not self.owner_store.owners:
+                self.owner_store.adopt(remote)
+                log.info("Владелец восстановлен из Telegram: %s", ", ".join(map(str, sorted(remote))))
+            elif self.owner_store.owners and not remote:
+                await save_remote_owners(bot, self.owner_store.owners)
+        except TelegramAPIError:
+            log.warning("Не удалось сверить владельца с Telegram", exc_info=True)
+
+    async def remember_owner(self, bot: Bot) -> None:
+        try:
+            await save_remote_owners(bot, self.owner_store.owners)
+        except TelegramAPIError:
+            log.warning("Не удалось сохранить владельца в Telegram", exc_info=True)
 
     @property
     def input_limit_mb(self) -> int:
@@ -305,6 +368,9 @@ class AccessMiddleware(BaseMiddleware):
         if user is None:
             return None
         if self.services.claim_owner(user.id) and isinstance(event, Message):
+            bot = data.get("bot")
+            if bot is not None and self.services.remote_owners_enabled:
+                self.services.spawn(self.services.remember_owner(bot), name="remember-owner")
             await event.answer(
                 "👑 Ты — владелец этого бота. Другие люди доступа не получат: они увидят сообщение «частный бот»."
             )
@@ -337,7 +403,7 @@ async def cmd_start(message: Message, services: BotServices) -> None:
 
 
 async def cmd_help(message: Message, services: BotServices) -> None:
-    mtproto = "включены (MTProto)" if services.mtproto_ready else (
+    mtproto = "включены (MTProto)" if services.big_files and services.mtproto is not None else (
         "Local Bot API Server" if services.settings.bot_api_mode == "local" else
         "выключены — нужны TG_API_ID и TG_API_HASH в .env"
     )
@@ -415,16 +481,17 @@ async def download_source(
             await bot.download(media.file_id, destination=destination, timeout=DOWNLOAD_TIMEOUT)
             return
         except TelegramBadRequest as exc:
-            if "too big" not in str(exc).lower() or not services.mtproto_ready:
+            if "too big" not in str(exc).lower() or not services.big_files:
                 raise
             destination.unlink(missing_ok=True)
-    if not services.mtproto_ready:
+    client = await services.mtproto_client()
+    if client is None:
         raise MediaError(
             f"Файл больше {BOT_API_DOWNLOAD_LIMIT_MB} МБ, а MTProto не подключён. "
-            "Добавь TG_API_ID и TG_API_HASH в .env и перезапусти бота."
+            "Проверь TG_API_ID и TG_API_HASH и перезапусти бота."
         )
     progress = ProgressReporter(status, "📥 Скачиваю видео…")
-    await services.mtproto.download(message.message_id, destination, progress=progress.on_bytes)
+    await client.download(message.message_id, destination, progress=progress.on_bytes)
     await progress.done()
 
 
@@ -464,6 +531,7 @@ async def on_video(message: Message, bot: Bot, services: BotServices) -> None:
     suffix = Path(filename).suffix.lower()
     source = job_dir / f"source{suffix if suffix in VIDEO_EXTENSIONS else '.mp4'}"
     status = await message.answer("📥 Получил видео. Скачиваю и проверяю файл…")
+    services.inflight += 1
     try:
         await download_source(bot, services, message, media, source, status)
         if not source.exists() or source.stat().st_size == 0:
@@ -480,6 +548,8 @@ async def on_video(message: Message, bot: Bot, services: BotServices) -> None:
         log.warning("Не удалось принять видео от %s: %s", user_id, exc, exc_info=not isinstance(exc, MediaError))
         await safe_edit(status, f"Не получилось принять видео: {friendly_error(exc)}")
         return
+    finally:
+        services.inflight -= 1
 
     services.jobs.set_pending(PendingUpload(
         user_id=user_id, chat_id=message.chat.id, message_id=message.message_id,
@@ -632,12 +702,13 @@ async def deliver(
                 caption=caption, supports_streaming=True, request_timeout=UPLOAD_TIMEOUT,
             )
         return
-    if not services.mtproto_ready:
+    client = await services.mtproto_client()
+    if client is None:
         raise MediaError(
-            "Готовый файл больше 50 МБ, а MTProto не подключён. Добавь TG_API_ID и TG_API_HASH в .env."
+            "Готовый файл больше 50 МБ, а MTProto не подключён. Проверь TG_API_ID и TG_API_HASH."
         )
     progress = ProgressReporter(status, "📤 Отправляю готовое видео…", reply_markup=stop_keyboard())
-    await services.mtproto.send_video(
+    await client.send_video(
         chat_id=pending.chat_id, message_id=pending.message_id, path=output, caption=caption,
         duration=info.duration, width=info.width, height=info.height, thumb=thumb, progress=progress.on_bytes,
     )
@@ -668,11 +739,11 @@ async def run_job(bot: Bot, services: BotServices, pending: PendingUpload, spec:
                                             min_interval=4.0)
                 await safe_edit(status, f"🎞 Обрабатываю видео{label}…", reply_markup=stop_keyboard())
                 if spec.kind == "unique" and spec.options:
-                    params = generate_params(spec.options, pending.info)
+                    params = generate_params(spec.options, pending.info, encode=services.profile)
                     result = await process_unique(
                         pending.source, output, params, info=pending.info,
                         timeout=settings.job_timeout_seconds, max_output_bytes=max_output_bytes,
-                        on_progress=progress.update,
+                        on_progress=progress.update, encode=services.profile,
                     )
                     title = f"🎲 Уникализатор · {INTENSITIES.get(params.intensity, params.intensity)}{label}"
                     details = describe(params)
@@ -680,7 +751,7 @@ async def run_job(bot: Bot, services: BotServices, pending: PendingUpload, spec:
                     result = await process_video(
                         pending.source, output, spec.preset_key, info=pending.info,
                         timeout=settings.job_timeout_seconds, max_output_bytes=max_output_bytes,
-                        on_progress=progress.update,
+                        on_progress=progress.update, profile=services.profile,
                     )
                     title = PRESETS[spec.preset_key].title
                     details = PRESETS[spec.preset_key].description

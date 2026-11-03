@@ -322,3 +322,62 @@ def test_first_user_becomes_owner_others_are_refused(tmp_path, sample):
         await bot.session.close()
 
     asyncio.run(scenario())
+
+
+class LazyMTProto(FakeMTProto):
+    available = False
+
+    def __init__(self, source):
+        super().__init__(source)
+        self.starts = 0
+
+    async def start(self):
+        self.starts += 1
+        self.available = True
+        return True
+
+
+def test_cloud_mode_lazy_mtproto_lite_profile_and_owner_restore(tmp_path, sample):
+    from aiogram.methods import GetMyCommands, SetMyCommands
+    from aiogram.types import BotCommand
+
+    async def scenario():
+        mtproto = LazyMTProto(sample)
+        session, bot, services, dp = build(tmp_path, {"vid1": sample}, mtproto=None, max_input_mb=300,
+                                           max_output_mb=1000, cpu_profile="lite")
+        services.mtproto, services.mtproto_lazy = mtproto, True
+        assert services.big_files and services.input_limit_mb == 300 and services.profile.name == "lite"
+
+        # Owner restored from Telegram after the disk was wiped.
+        original = session.make_request
+
+        async def with_commands(bot_, method, timeout=None):
+            if isinstance(method, GetMyCommands):
+                session.calls.append(method)
+                return [BotCommand(command="vreowner", description="777")]
+            return await original(bot_, method, timeout)
+
+        session.make_request = with_commands
+        await services.restore_owners(bot)
+        assert services.owner_store.owners == {777}
+
+        await dp.feed_update(bot, video_update(bot, 1, 321, "big", 60 * MB))
+        assert mtproto.starts == 1 and mtproto.downloads == [321]  # logged in only when needed
+        assert not any("владелец этого бота" in text for text in session.texts())  # already owned
+        assert services.busy()  # a pending upload keeps a cloud instance awake
+        await dp.feed_update(bot, callback_update(bot, 2, "preset:reels_fill"))
+        await wait_jobs(services)
+        assert (session.videos[-1]["width"], session.videos[-1]["height"]) == (720, 1280)  # lite size
+        await dp.feed_update(bot, callback_update(bot, 3, "job:cancel"))
+        assert not services.busy()
+        await bot.session.close()
+
+        # A fresh bot without stored owner: the first user claims it and it is saved on Telegram.
+        session2, bot2, services2, dp2 = build(tmp_path / "fresh", {"vid1": sample})
+        await dp2.feed_update(bot2, text_update(bot2, 1, "/start"))
+        await wait_jobs(services2)
+        saved = [c for c in session2.calls if isinstance(c, SetMyCommands) and c.language_code == "zu"]
+        assert saved and saved[-1].commands[0].description == "777"
+        await bot2.session.close()
+
+    asyncio.run(scenario())

@@ -26,6 +26,41 @@ MAX_FPS = 60
 MIN_FALLBACK_VIDEO_KBPS = 250
 
 
+@dataclass(frozen=True)
+class EncodeProfile:
+    """How heavy the processing may be. "lite" is for weak free servers (0.1 CPU, 512 MB)."""
+
+    name: str = "normal"
+    long_side: int = MAX_LONG_SIDE
+    fallback_long_side: int = FALLBACK_LONG_SIDE
+    vertical: tuple[int, int] = (1080, 1920)
+    vertical_fallback: tuple[int, int] = (720, 1280)
+    square: tuple[int, int] = (1080, 1080)
+    square_fallback: tuple[int, int] = (720, 720)
+    x264_preset: str = "veryfast"
+    crf_offset: int = 0
+    threads: int = 0  # 0 = FFmpeg decides
+    heavy_filters: bool = True  # rotation, grain, sharpening, vignette in the uniquelizer
+
+    def fill_size(self, aspect: str, fallback: bool) -> tuple[int, int]:
+        if aspect == "9:16":
+            return self.vertical_fallback if fallback else self.vertical
+        return self.square_fallback if fallback else self.square
+
+    def thread_args(self) -> list[str]:
+        if not self.threads:
+            return []
+        return ["-threads", str(self.threads), "-filter_threads", str(self.threads)]
+
+
+NORMAL_PROFILE = EncodeProfile()
+LITE_PROFILE = EncodeProfile(
+    name="lite", long_side=1280, fallback_long_side=960, vertical=(720, 1280), vertical_fallback=(540, 960),
+    square=(720, 720), square_fallback=(540, 540), x264_preset="ultrafast", crf_offset=2, threads=1,
+    heavy_filters=False,
+)
+
+
 class MediaError(RuntimeError):
     """Problem with the video itself or with FFmpeg; the message is shown to the user."""
 
@@ -207,22 +242,22 @@ def fps_cap_filter(source_fps: float, speed: float = 1.0) -> str | None:
     return None
 
 
-def build_video_filter(preset: Preset, fallback: bool = False, *, info: VideoInfo | None = None) -> str:
+def build_video_filter(
+    preset: Preset, fallback: bool = False, *, info: VideoInfo | None = None,
+    profile: EncodeProfile = NORMAL_PROFILE,
+) -> str:
     parts: list[str] = []
     sar_fix = sar_fix_filter(info)
     if sar_fix:
         parts.append(sar_fix)
     if preset.framing == "fill":
-        if preset.aspect == "9:16":
-            target_w, target_h = (720, 1280) if fallback else (1080, 1920)
-        else:
-            target_w, target_h = (720, 720) if fallback else (1080, 1080)
+        target_w, target_h = profile.fill_size(preset.aspect, fallback)
         parts.extend([
             f"scale={target_w}:{target_h}:force_original_aspect_ratio=increase",
             f"crop={target_w}:{target_h}",
         ])
     elif preset.framing == "fit":
-        target_w, target_h = (720, 1280) if fallback else (1080, 1920)
+        target_w, target_h = profile.fill_size("9:16", fallback)
         parts.extend([
             f"scale={target_w}:{target_h}:force_original_aspect_ratio=decrease:force_divisible_by=2",
             f"pad={target_w}:{target_h}:(ow-iw)/2:(oh-ih)/2:color=black",
@@ -230,7 +265,7 @@ def build_video_filter(preset: Preset, fallback: bool = False, *, info: VideoInf
     else:
         # Fit into a box without upscaling; the longer side is limited for both
         # landscape and portrait videos, and the size always stays even for H.264.
-        box = FALLBACK_LONG_SIDE if fallback else MAX_LONG_SIDE
+        box = profile.fallback_long_side if fallback else profile.long_side
         parts.append(
             f"scale='min(iw,{box})':'min(ih,{box})':force_original_aspect_ratio=decrease:force_divisible_by=2"
         )
@@ -251,13 +286,15 @@ def video_rate_args(crf: int, video_kbps: int | None) -> list[str]:
 
 def build_preset_args(
     source: Path, destination: Path, preset: Preset, *, info: VideoInfo, video_kbps: int | None = None,
+    profile: EncodeProfile = NORMAL_PROFILE,
 ) -> list[str]:
     fallback = video_kbps is not None
     args = [
+        *profile.thread_args(),
         "-i", str(source),
         "-map", "0:v:0", "-map", "0:a:0?",
-        "-vf", build_video_filter(preset, fallback, info=info),
-        "-c:v", "libx264", "-preset", "veryfast", *video_rate_args(23, video_kbps),
+        "-vf", build_video_filter(preset, fallback, info=info, profile=profile),
+        "-c:v", "libx264", "-preset", profile.x264_preset, *video_rate_args(23 + profile.crf_offset, video_kbps),
         "-pix_fmt", "yuv420p",
         "-c:a", "aac", "-b:a", "96k" if fallback else "128k",
         "-map_metadata", "-1", "-map_chapters", "-1",
@@ -397,12 +434,13 @@ async def process_video(
     timeout: int,
     max_output_bytes: int,
     on_progress: ProgressCallback | None = None,
+    profile: EncodeProfile = NORMAL_PROFILE,
 ) -> VideoInfo:
     if preset_key not in PRESETS:
         raise ValueError("Неизвестный режим обработки")
     preset = PRESETS[preset_key]
     return await encode_with_size_limit(
-        lambda kbps: build_preset_args(source, destination, preset, info=info, video_kbps=kbps),
+        lambda kbps: build_preset_args(source, destination, preset, info=info, video_kbps=kbps, profile=profile),
         destination, output_duration=info.duration, audio_kbps_fallback=96,
         timeout=timeout, max_output_bytes=max_output_bytes, on_progress=on_progress,
     )

@@ -118,3 +118,20 @@ def test_options_are_normalized():
 def test_description_is_human_readable():
     text = describe(generate_params(UniqueOptions(intensity="strong", mirror=True), make_info(), seed=5))
     assert "зум" in text and "зеркало" in text and "метаданные" in text
+
+
+def test_lite_profile_drops_heavy_filters(tmp_path):
+    from app.media import LITE_PROFILE
+
+    info = make_info()
+    for seed in range(50):
+        p = generate_params(UniqueOptions(intensity="strong"), info, seed=seed, encode=LITE_PROFILE)
+        assert p.rotate_deg == 0 and p.noise == 0 and p.sharpen == 0 and p.vignette == 0
+        assert PROFILES["strong"].zoom[0] - 1e-4 <= p.zoom <= PROFILES["strong"].zoom[1] + 1e-4
+        graph = build_unique_video_filter(p, info, encode=LITE_PROFILE)
+        assert "rotate=" not in graph and "noise=" not in graph and "unsharp" not in graph
+        assert "min(iw,1280)" in graph
+    p = generate_params(UniqueOptions(fmt="9:16"), info, seed=1, encode=LITE_PROFILE)
+    assert "crop=720:1280" in build_unique_video_filter(p, info, encode=LITE_PROFILE)
+    args = build_unique_args(tmp_path / "in.mp4", tmp_path / "out.mp4", p, info=info, encode=LITE_PROFILE)
+    assert "-bf" not in args and args[args.index("-preset") + 1] == "ultrafast" and "-threads" in args

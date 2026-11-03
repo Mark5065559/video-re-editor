@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.3.0 — 2026-11-03
+- Free cloud hosting without a bank card (Render): render.yaml blueprint, HTTP server on $PORT with
+  /health, Telegram webhook so a sleeping free instance is woken by incoming messages, self-ping only
+  while a download/job/pending source exists (KEEP_AWAKE=busy|always|off), polling stays the default
+  without a public URL.
+- Light processing profile for weak servers (CPU_PROFILE=auto detects cgroup limits < 1 CPU or
+  < 1.5 GB): 720p, x264 ultrafast, one thread, no rotation/grain/sharpening/vignette in the
+  uniquelizer. On a 0.1 CPU / 512 MB container a 10 s 1080p clip takes 34 s and 130 MB instead of
+  102-353 s and ~450 MB (which would not fit next to the bot).
+- MTProto logs in only when a big file needs it in webhook mode (fewer logins on every cold start).
+- The owner is also stored on Telegram's side (a hidden per-scope command list), so a wiped disk on
+  a free host no longer hands the bot to the next person who writes.
+
 ## 1.2.0 — 2026-11-03
 - Owner mode (default): the first person who writes to the bot becomes its owner, everybody else is
   refused. No Telegram ID has to be configured. ACCESS_MODE=public keeps the old open behaviour,

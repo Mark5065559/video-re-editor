@@ -155,6 +155,9 @@ class JobManager:
     def active_count(self) -> int:
         return len(self._active)
 
+    def pending_count(self) -> int:
+        return len(self._pending)
+
 
 def clean_temp_root(temp_dir: Path) -> int:
     """At start-up nothing is pending yet, so every leftover job folder is garbage."""

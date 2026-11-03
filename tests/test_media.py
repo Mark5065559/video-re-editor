@@ -123,3 +123,17 @@ def test_probe_uses_stream_duration_and_ignores_cover_art():
     info = parse_probe(data, 1)
     assert (info.width, info.height, info.video_codec, info.duration) == (1280, 720, "vp9", 7.0)
     assert not info.has_audio
+
+
+def test_lite_profile_is_light(tmp_path: Path):
+    from app.media import LITE_PROFILE
+
+    graph = build_video_filter(PRESETS["keep"], info=make_info(), profile=LITE_PROFILE)
+    assert "min(iw,1280)" in graph and "min(ih,1280)" in graph
+    assert "scale=720:1280" in build_video_filter(PRESETS["reels_fill"], profile=LITE_PROFILE)
+    assert "crop=720:720" in build_video_filter(PRESETS["square"], profile=LITE_PROFILE)
+    assert "crop=540:960" in build_video_filter(PRESETS["shorts_fill"], True, profile=LITE_PROFILE)
+    args = build_preset_args(tmp_path / "in.mp4", tmp_path / "out.mp4", PRESETS["keep"], info=make_info(),
+                             profile=LITE_PROFILE)
+    assert args[:4] == ["-threads", "1", "-filter_threads", "1"]
+    assert args[args.index("-preset") + 1] == "ultrafast" and args[args.index("-crf") + 1] == "25"

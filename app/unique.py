@@ -17,9 +17,9 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from .media import (
-    FALLBACK_LONG_SIDE,
     MAX_FPS,
-    MAX_LONG_SIDE,
+    NORMAL_PROFILE,
+    EncodeProfile,
     ProgressCallback,
     VideoInfo,
     encode_with_size_limit,
@@ -161,6 +161,7 @@ def _signed(rng: random.Random, bounds: tuple[float, float]) -> float:
 
 def generate_params(
     options: UniqueOptions, info: VideoInfo, *, seed: int | None = None, now: datetime | None = None,
+    encode: EncodeProfile = NORMAL_PROFILE,
 ) -> UniqueParams:
     seed = secrets.randbits(32) if seed is None else seed
     rng = random.Random(seed)
@@ -188,6 +189,11 @@ def generate_params(
         vignette = rng.uniform(*profile.vignette)
 
     moment = (now or datetime.now(timezone.utc)) - timedelta(seconds=rng.randint(0, 3600))
+    noise = rng.randint(*profile.noise)
+    sharpen = round(rng.uniform(*profile.sharpen), 3)
+    if not encode.heavy_filters:
+        # Weak server: skip the CPU-hungry filters, keep zoom/shift/colour/speed/audio/metadata.
+        zoom, rotate, noise, sharpen, vignette = zoom_extra, 0.0, 0, 0.0, 0.0
     return UniqueParams(
         seed=seed,
         intensity=options.intensity if options.intensity in PROFILES else "medium",
@@ -202,8 +208,8 @@ def generate_params(
         saturation=round(rng.uniform(*profile.saturation), 4),
         gamma=round(rng.uniform(*profile.gamma), 4),
         hue_deg=round(_signed(rng, profile.hue), 2),
-        noise=rng.randint(*profile.noise),
-        sharpen=round(rng.uniform(*profile.sharpen), 3),
+        noise=noise,
+        sharpen=sharpen,
         vignette=round(vignette, 4),
         speed=round(rng.uniform(*profile.speed), 4) if options.speed else 1.0,
         trim_start=round(trim_start, 3),
@@ -237,12 +243,14 @@ def output_duration(params: UniqueParams, info: VideoInfo) -> float:
     return kept / params.speed
 
 
-def build_unique_video_filter(params: UniqueParams, info: VideoInfo, *, fallback: bool = False) -> str:
+def build_unique_video_filter(
+    params: UniqueParams, info: VideoInfo, *, fallback: bool = False, encode: EncodeProfile = NORMAL_PROFILE,
+) -> str:
     parts: list[str] = []
     sar_fix = sar_fix_filter(info)
     if sar_fix:
         parts.append(sar_fix)
-    box = FALLBACK_LONG_SIDE if fallback else MAX_LONG_SIDE
+    box = encode.fallback_long_side if fallback else encode.long_side
     parts.append(
         f"scale='min(iw,{box})':'min(ih,{box})':force_original_aspect_ratio=decrease:force_divisible_by=2"
     )
@@ -259,7 +267,7 @@ def build_unique_video_filter(params: UniqueParams, info: VideoInfo, *, fallback
             f":'(iw-ow)/2{params.shift_x:+.5f}*ow':'(ih-oh)/2{params.shift_y:+.5f}*oh'"
         )
     if params.fmt in FORMAT_SIZES:
-        width, height = FORMAT_SIZES[params.fmt][1 if fallback else 0]
+        width, height = encode.fill_size(params.fmt, fallback)
         parts.append(f"scale={width}:{height}:force_original_aspect_ratio=increase")
         parts.append(f"crop={width}:{height}")
     parts.append(
@@ -297,19 +305,21 @@ def build_unique_audio_filter(params: UniqueParams) -> str:
 
 def build_unique_args(
     source: Path, destination: Path, params: UniqueParams, *, info: VideoInfo, video_kbps: int | None = None,
+    encode: EncodeProfile = NORMAL_PROFILE,
 ) -> list[str]:
     fallback = video_kbps is not None
     kept = max(0.5, info.duration - params.trim_start - params.trim_end)
     gop = max(10, round(params.gop_seconds * output_fps(info.fps)[0]))
-    args: list[str] = []
+    args: list[str] = [*encode.thread_args()]
     if params.trim_start > 0:
         args.extend(["-ss", f"{params.trim_start:.3f}"])
     args.extend(["-t", f"{kept:.3f}", "-i", str(source)])
     args.extend([
         "-map", "0:v:0", "-map", "0:a:0?",
-        "-vf", build_unique_video_filter(params, info, fallback=fallback),
-        "-c:v", "libx264", "-preset", "veryfast", *video_rate_args(params.crf, video_kbps),
-        "-g", str(gop), "-bf", str(params.bframes), "-pix_fmt", "yuv420p",
+        "-vf", build_unique_video_filter(params, info, fallback=fallback, encode=encode),
+        "-c:v", "libx264", "-preset", encode.x264_preset,
+        *video_rate_args(params.crf + encode.crf_offset, video_kbps),
+        "-g", str(gop), *(["-bf", str(params.bframes)] if encode.heavy_filters else []), "-pix_fmt", "yuv420p",
         # Drop encoder info SEI (x264 version/options) from the video stream.
         "-bsf:v", "filter_units=remove_types=6",
     ])
@@ -338,9 +348,10 @@ async def process_unique(
     timeout: int,
     max_output_bytes: int,
     on_progress: ProgressCallback | None = None,
+    encode: EncodeProfile = NORMAL_PROFILE,
 ) -> VideoInfo:
     return await encode_with_size_limit(
-        lambda kbps: build_unique_args(source, destination, params, info=info, video_kbps=kbps),
+        lambda kbps: build_unique_args(source, destination, params, info=info, video_kbps=kbps, encode=encode),
         destination, output_duration=output_duration(params, info), audio_kbps_fallback=96,
         timeout=timeout, max_output_bytes=max_output_bytes, on_progress=on_progress,
     )

@@ -48,6 +48,12 @@ class Settings:
     # owner: the first person who writes to the bot becomes its owner, others are refused;
     # public: anyone may use the bot (with rate limits). ALLOWED_USER_IDS overrides both.
     access_mode: str = "owner"
+    # Cloud hosting (Render and similar): HTTP port for the health check / webhook and the public URL.
+    port: int = 0
+    public_url: str = ""
+    run_mode: str = "polling"  # polling | webhook (resolved from RUN_MODE=auto)
+    keep_awake: str = "busy"  # webhook mode: busy = stay awake only while working, always, off
+    cpu_profile: str = "normal"  # normal | lite (resolved from CPU_PROFILE=auto)
 
     @property
     def mtproto_configured(self) -> bool:
@@ -79,6 +85,48 @@ class Settings:
         # Telethon appends ".session". The bot id in the name keeps sessions of
         # different bots apart if the token is ever changed.
         return self.data_dir / f"mtproto_bot_{self.bot_id}"
+
+
+def _cgroup_cpu_limit() -> float | None:
+    try:
+        quota, period = Path("/sys/fs/cgroup/cpu.max").read_text().split()[:2]
+        if quota != "max":
+            return int(quota) / int(period)
+    except (OSError, ValueError):
+        pass
+    try:
+        quota_us = int(Path("/sys/fs/cgroup/cpu/cpu.cfs_quota_us").read_text())
+        period_us = int(Path("/sys/fs/cgroup/cpu/cpu.cfs_period_us").read_text())
+        if quota_us > 0 and period_us > 0:
+            return quota_us / period_us
+    except (OSError, ValueError):
+        pass
+    return None
+
+
+def _cgroup_memory_limit() -> int | None:
+    for path in ("/sys/fs/cgroup/memory.max", "/sys/fs/cgroup/memory/memory.limit_in_bytes"):
+        try:
+            raw = Path(path).read_text().strip()
+            if raw != "max" and int(raw) < 1 << 50:
+                return int(raw)
+        except (OSError, ValueError):
+            continue
+    return None
+
+
+def detect_weak_machine() -> bool:
+    """Free cloud instances (e.g. Render: 0.1 CPU, 512 MB) need the light processing profile."""
+    cpu = _cgroup_cpu_limit()
+    memory = _cgroup_memory_limit()
+    return (cpu is not None and cpu < 1.0) or (memory is not None and memory < 1536 * MB)
+
+
+def _choice_env(name: str, default: str, allowed: set[str]) -> str:
+    value = (os.getenv(name) or default).strip().lower()
+    if value not in allowed:
+        raise ValueError(f"{name} должен быть одним из: {', '.join(sorted(allowed))}")
+    return value
 
 
 def _int_env(name: str, default: int, minimum: int = 1, maximum: int | None = None) -> int:
@@ -159,9 +207,20 @@ def load_settings(*, use_dotenv: bool = True) -> Settings:
     if mode not in {"official", "local"}:
         raise ValueError("BOT_API_MODE должен быть official или local")
 
-    access_mode = (os.getenv("ACCESS_MODE") or "owner").strip().lower()
-    if access_mode not in {"owner", "public"}:
-        raise ValueError("ACCESS_MODE должен быть owner или public")
+    access_mode = _choice_env("ACCESS_MODE", "owner", {"owner", "public"})
+
+    port = _int_env("PORT", 0, minimum=0, maximum=65535)
+    public_url = (os.getenv("WEBHOOK_BASE_URL") or os.getenv("RENDER_EXTERNAL_URL") or "").strip().rstrip("/")
+    run_mode = _choice_env("RUN_MODE", "auto", {"auto", "polling", "webhook"})
+    if run_mode == "auto":
+        run_mode = "webhook" if public_url and port else "polling"
+    if run_mode == "webhook":
+        if not port or not public_url.startswith("https://"):
+            raise ValueError("Для RUN_MODE=webhook нужны PORT и публичный адрес https:// (WEBHOOK_BASE_URL)")
+    keep_awake = _choice_env("KEEP_AWAKE", "busy", {"busy", "always", "off"})
+    cpu_profile = _choice_env("CPU_PROFILE", "auto", {"auto", "normal", "lite"})
+    if cpu_profile == "auto":
+        cpu_profile = "lite" if detect_weak_machine() else "normal"
 
     api_id, api_hash = _api_credentials()
     if mode == "local":
@@ -196,7 +255,7 @@ def load_settings(*, use_dotenv: bool = True) -> Settings:
         max_duration_seconds=_int_env("MAX_DURATION_SECONDS", 600),
         data_dir=Path(os.getenv("DATA_DIR") or "./data").expanduser().resolve(),
         max_parallel_jobs=_int_env("MAX_PARALLEL_JOBS", 1),
-        job_timeout_seconds=_int_env("JOB_TIMEOUT_SECONDS", 900, minimum=30),
+        job_timeout_seconds=_int_env("JOB_TIMEOUT_SECONDS", 3600 if cpu_profile == "lite" else 900, minimum=30),
         user_rate_limit_count=_int_env("USER_RATE_LIMIT_COUNT", 3),
         user_rate_limit_window_seconds=_int_env("USER_RATE_LIMIT_WINDOW_SECONDS", 600),
         tg_api_id=api_id,
@@ -205,4 +264,9 @@ def load_settings(*, use_dotenv: bool = True) -> Settings:
         pending_ttl_minutes=_int_env("PENDING_TTL_MINUTES", 30),
         max_unique_copies=_int_env("MAX_UNIQUE_COPIES", 5, maximum=10),
         access_mode=access_mode,
+        port=port,
+        public_url=public_url,
+        run_mode=run_mode,
+        keep_awake=keep_awake,
+        cpu_profile=cpu_profile,
     )
