@@ -16,6 +16,5 @@ COPY app ./app
 COPY main.py ./main.py
 RUN mkdir -p /data && chown -R appuser:appuser /app /data
 USER appuser
-VOLUME ["/data"]
 
 CMD ["python", "main.py"]
