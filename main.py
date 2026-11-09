@@ -143,6 +143,7 @@ async def main() -> int:
         except TelegramAPIError:
             log.warning("Не удалось установить список команд", exc_info=True)
 
+        STATUS["access"] = services.access_description
         background.append(asyncio.create_task(services.cleanup_loop()))
         log.info(
             "Бот запущен: @%s | режим=%s | обработка=%s | вход до %s МБ, выход до %s МБ | доступ: %s",

@@ -23,3 +23,9 @@ services:
       # the free instance has 0.1 CPU and 512 MB: 720p, fast encoder, light filters
       - key: CPU_PROFILE
         value: lite
+      # open to everyone (with per-user rate limits), for sharing the bot in a community
+      - key: ACCESS_MODE
+        value: public
+      # the free server is slow: Reels/Shorts-length videos only
+      - key: MAX_DURATION_SECONDS
+        value: "180"
