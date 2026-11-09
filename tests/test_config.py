@@ -135,3 +135,9 @@ def test_cloud_settings(env):
     env.setenv("RENDER_EXTERNAL_URL", "http://insecure.example")
     with pytest.raises(ValueError):
         load_settings(use_dotenv=False)
+
+
+def test_render_never_sleeps(env):
+    env.setenv("RENDER", "true")
+    env.setenv("KEEP_AWAKE", "busy")
+    assert load_settings(use_dotenv=False).keep_awake == "always"

@@ -237,6 +237,11 @@ def load_settings(*, use_dotenv: bool = True) -> Settings:
         if not port or not public_url.startswith("https://"):
             raise ValueError("Для RUN_MODE=webhook нужны PORT и публичный адрес https:// (WEBHOOK_BASE_URL)")
     keep_awake = _choice_env("KEEP_AWAKE", "busy", {"busy", "always", "off"})
+    if os.getenv("RENDER") and keep_awake == "busy":
+        # A sleeping Render free instance answers Telegram's webhook with 502 and the message
+        # is delayed for a long time, so on Render the bot must not fall asleep.
+        log.info("Render: KEEP_AWAKE=busy заменён на always — спящий сервис отвечает Telegram ошибкой 502.")
+        keep_awake = "always"
     cpu_profile = _choice_env("CPU_PROFILE", "auto", {"auto", "normal", "lite"})
     if cpu_profile == "auto":
         cpu_profile = "lite" if detect_weak_machine() else "normal"
